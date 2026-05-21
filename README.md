@@ -7,7 +7,7 @@ A tiny Lua library for scripting Beat Saber modcharts.
 ```lua
 local map = require("Noodle Extensions"),
 local map = require("Chroma"),
-local map = require("Dymosis"),
+local map = require("Fluxion"),
 
 -- Move all notes up
 map.notes(function(n) n.animation.offsetPosition = {0, 2, 0} end)
