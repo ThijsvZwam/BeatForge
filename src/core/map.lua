@@ -3,7 +3,7 @@
 --- note/wall/bomb/arc/chain/event collections, and writes
 --- the final file back to disk.
 
-local json = require("beatforge.utils.json")
+local json  = require("beatforge.utils.json")
 local Note  = require("beatforge.core.note")
 local Wall  = require("beatforge.core.wall")
 local Bomb  = require("beatforge.core.bomb")
@@ -24,14 +24,15 @@ function Map.load(path)
     local data = json.decode(raw)
 
     local self = setmetatable({
-        _path    = path,
-        _data    = data,
-        _notes   = {},
-        _walls   = {},
-        _bombs   = {},
-        _arcs    = {},
-        _chains  = {},
-        _events  = {},
+        _path           = path,
+        _data           = data,
+        _notes          = {},
+        _walls          = {},
+        _bombs          = {},
+        _arcs           = {},
+        _chains         = {},
+        _events         = {},
+        _exportSettings = nil,
     }, Map)
 
     -- Wrap every raw object in its typed wrapper
@@ -39,7 +40,7 @@ function Map.load(path)
     for _, w in ipairs(data.obstacles        or {}) do table.insert(self._walls,  Wall.wrap(w))  end
     for _, b in ipairs(data.bombNotes        or {}) do table.insert(self._bombs,  Bomb.wrap(b))  end
     for _, e in ipairs(data.basicBeatmapEvents or {}) do table.insert(self._events, Event.wrap(e)) end
-    -- arcs / chains pass through as raw tables for now
+    -- Arcs / chains pass through as raw tables for now
     for _, a in ipairs(data.sliders          or {}) do table.insert(self._arcs,   a) end
     for _, c in ipairs(data.burstSliders     or {}) do table.insert(self._chains, c) end
 
@@ -50,16 +51,17 @@ end
 --- @return Map
 function Map.new()
     return setmetatable({
-        _path    = "output.dat",
-        _data    = { version = "3.3.0", colorNotes = {}, obstacles = {}, bombNotes = {},
-                     basicBeatmapEvents = {}, sliders = {}, burstSliders = {},
-                     customData = {} },
-        _notes   = {}, _walls  = {}, _bombs  = {},
-        _arcs    = {}, _chains = {}, _events = {},
+        _path           = "output.dat",
+        _data           = { version = "3.3.0", colorNotes = {}, obstacles = {}, bombNotes = {},
+                             basicBeatmapEvents = {}, sliders = {}, burstSliders = {},
+                             customData = {} },
+        _notes          = {}, _walls  = {}, _bombs  = {},
+        _arcs           = {}, _chains = {}, _events = {},
+        _exportSettings = nil,
     }, Map)
 end
 
--- ─── Collection iterators ─────────────────────────────────────────────────────
+-- ─── Collection Iterators ─────────────────────────────────────────────────────
 
 --- Iterate all color notes, passing each to callback.
 --- The callback may modify the note in-place.
@@ -138,6 +140,9 @@ end
 function Map:setSettings(settings)
     self._data.customData = self._data.customData or {}
     self._data.customData._settings = settings
+    
+    -- Cache settings so pipeline.lua can copy mod requirements to info.dat
+    self._exportSettings = settings
     return self
 end
 

@@ -8,6 +8,7 @@
 ---   BeatForge.Wall       — Wall constructor
 ---   BeatForge.Bomb       — Bomb constructor
 ---   BeatForge.Event      — Event constructor
+---   BeatForge.pipeline   — Pipeline deployment engine
 ---   BeatForge.heck       — Heck custom-event builders
 ---   BeatForge.chroma     — Chroma helpers
 ---   BeatForge.noodle     — Noodle Extensions helpers
@@ -30,12 +31,16 @@ package.path = libDir .. "?.lua;" .. libDir .. "?/init.lua;" .. package.path
 
 local BeatForge = {}
 
+-- Global tracked registry so the pipeline can detect which maps were loaded/mutated
+_BF_ACTIVE_MAPS = {}
+
 -- ─── Core classes ────────────────────────────────────────────────────────────
-BeatForge.Map   = require("beatforge.core.map")
-BeatForge.Note  = require("beatforge.core.note")
-BeatForge.Wall  = require("beatforge.core.wall")
-BeatForge.Bomb  = require("beatforge.core.bomb")
-BeatForge.Event = require("beatforge.core.event")
+BeatForge.Map      = require("beatforge.core.map")
+BeatForge.Note     = require("beatforge.core.note")
+BeatForge.Wall     = require("beatforge.core.wall")
+BeatForge.Bomb     = require("beatforge.core.bomb")
+BeatForge.Event    = require("beatforge.core.event")
+BeatForge.pipeline = require("beatforge.core.pipeline")
 
 -- ─── Modules ─────────────────────────────────────────────────────────────────
 BeatForge.heck   = require("beatforge.modules.heck")
@@ -49,13 +54,28 @@ BeatForge.math   = require("beatforge.utils.bfmath")
 --- @param path string
 --- @return Map
 function BeatForge.load(path)
-    return BeatForge.Map.load(path)
+    local instance = BeatForge.Map.load(path)
+    
+    -- Track this file in our registry so pipeline.export knows it's active
+    local standardKey = path:match("([^/\\]+)$") or path
+    _BF_ACTIVE_MAPS[standardKey] = instance
+    
+    return instance
 end
 
 --- Create an empty beatmap.
+--- @param filename string|nil Optional target file descriptor (defaults to output.dat)
 --- @return Map
-function BeatForge.new()
-    return BeatForge.Map.new()
+function BeatForge.new(filename)
+    local instance = BeatForge.Map.new()
+    if filename then
+        instance._path = filename
+    end
+    
+    local standardKey = instance._path:match("([^/\\]+)$") or instance._path
+    _BF_ACTIVE_MAPS[standardKey] = instance
+    
+    return instance
 end
 
 -- ─── Version ─────────────────────────────────────────────────────────────────
