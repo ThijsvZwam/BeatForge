@@ -2026,7 +2026,7 @@ _BF_MODULES["pipeline"] = (function()
 ---   • Copies media and untouched diffs to the output directory
 ---   • Optionally creates a .zip archive
 
-local json    = require("beatforge.utils.json")
+local json    = _BF_MODULES["json"]()
 local InfoDat = _bf_require("info")
 
 --- @class Pipeline
