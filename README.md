@@ -3,6 +3,8 @@
 ai used:     https://chatgpt.com/share/6a0eff71-3318-8327-9c9d-afb0b73686e7
              https://claude.ai/share/1da48d01-6fb3-4d34-bed5-381d1adc98bd 
              https://gemini.google.com/share/c4877f5a9191
+             https://chatgpt.com/share/6a218332-2058-8394-adf0-bdd2b446b729
+             https://claude.ai/chat/a0003dec-8dab-4b1a-9d5c-35a6f1cb2ca3
 # BeatForge
 
 A lightweight Lua library for scripting Beat Saber modcharts.
