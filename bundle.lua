@@ -1,4 +1,4 @@
--- BeatForge v1.0.0  —  single-file bundle
+-- BeatForge v1.1.0  —  single-file bundle
 -- Drop this file in your map folder and: local bf = require('beatforge')
 
 -- ── Module registry ──────────────────────────────────────────────────────────
@@ -1199,206 +1199,1047 @@ _BF_MODULES["noodle"] = (function()
     return noodle
 end)()
 
+-- ── Module: info ──────────────────────────────────────────────────────────
+_BF_MODULES["info"] = (function()
+
+--- BeatForge: core/info.lua
+--- Loads, manipulates, and saves info.dat (v2 format).
+--- Handles per-difficulty requirements/suggestions/settings propagation
+--- and Vivify bundle checksum injection.
+
+local json = _bf_require("json")
+
+--- @class InfoDat
+local InfoDat = {}
+InfoDat.__index = InfoDat
+
+-- ─── Load / New ───────────────────────────────────────────────────────────────
+
+--- Load an existing info.dat from disk.
+--- @param path string  Defaults to "info.dat"
+--- @return InfoDat
+function InfoDat.load(path)
+    path = path or "info.dat"
+    local f = io.open(path, "r")
+    if not f then
+        error("BeatForge InfoDat: could not open '" .. path .. "'")
+    end
+    local raw = f:read("*a")
+    f:close()
+    return setmetatable({ _path = path, _data = json.decode(raw) }, InfoDat)
+end
+
+--- Create a minimal, empty info.dat object (for generative projects).
+--- @return InfoDat
+function InfoDat.new()
+    return setmetatable({
+        _path = "info.dat",
+        _data = {
+            _version             = "2.1.0",
+            _songName            = "Unknown",
+            _songSubName         = "",
+            _songAuthorName      = "Unknown Artist",
+            _levelAuthorName     = "",
+            _beatsPerMinute      = 120,
+            _shuffle             = 0,
+            _shufflePeriod       = 0.5,
+            _previewStartTime    = 12,
+            _previewDuration     = 10,
+            _songFilename        = "song.ogg",
+            _coverImageFilename  = "cover.jpg",
+            _environmentName     = "DefaultEnvironment",
+            _allDirectionsEnvironmentName = "GlassDesertEnvironment",
+            _customData          = {},
+            _difficultyBeatmapSets = {},
+        },
+    }, InfoDat)
+end
+
+-- ─── Top-level metadata ───────────────────────────────────────────────────────
+
+function InfoDat:getSongName()       return self._data._songName end
+function InfoDat:setSongName(v)      self._data._songName = v; return self end
+function InfoDat:getSongAuthor()     return self._data._songAuthorName end
+function InfoDat:setSongAuthor(v)    self._data._songAuthorName = v; return self end
+function InfoDat:getLevelAuthor()    return self._data._levelAuthorName end
+function InfoDat:setLevelAuthor(v)   self._data._levelAuthorName = v; return self end
+function InfoDat:getBPM()            return self._data._beatsPerMinute end
+function InfoDat:setBPM(v)           self._data._beatsPerMinute = v; return self end
+function InfoDat:getSongFilename()   return self._data._songFilename end
+function InfoDat:setSongFilename(v)  self._data._songFilename = v; return self end
+function InfoDat:getCoverFilename()  return self._data._coverImageFilename end
+function InfoDat:setCoverFilename(v) self._data._coverImageFilename = v; return self end
+
+-- ─── Diff lookup ─────────────────────────────────────────────────────────────
+
+--- Iterate all difficulty entries in all beatmap sets.
+--- Callback receives (diffEntry, setEntry).
+--- @param fn fun(diff: table, set: table)
+function InfoDat:eachDiff(fn)
+    for _, set in ipairs(self._data._difficultyBeatmapSets or {}) do
+        for _, diff in ipairs(set._difficultyBeatmaps or {}) do
+            fn(diff, set)
+        end
+    end
+end
+
+--- Find a specific diff entry by characteristic + difficulty label.
+--- @param characteristic string  e.g. "Standard", "OneSaber"
+--- @param difficulty     string  e.g. "ExpertPlus"
+--- @return table|nil
+function InfoDat:findDiff(characteristic, difficulty)
+    for _, set in ipairs(self._data._difficultyBeatmapSets or {}) do
+        if set._beatmapCharacteristicName == characteristic then
+            for _, diff in ipairs(set._difficultyBeatmaps or {}) do
+                if diff._difficulty == difficulty then
+                    return diff
+                end
+            end
+        end
+    end
+    return nil
+end
+
+--- Find a diff entry by its filename.
+--- @param filename string  e.g. "ExpertPlus.dat" or "ExpertPlusStandard.dat"
+--- @return table|nil
+function InfoDat:findDiffByFile(filename)
+    local found
+    self:eachDiff(function(diff)
+        if diff._beatmapFilename == filename then found = diff end
+    end)
+    return found
+end
+
+-- ─── Per-diff custom data helpers ────────────────────────────────────────────
+
+local function diffCD(diff)
+    diff._customData = diff._customData or {}
+    return diff._customData
+end
+
+--- Set requirements on a specific diff (by filename).
+--- Merges with any existing requirements.
+--- @param filename     string
+--- @param requirements string[]
+function InfoDat:setRequirements(filename, requirements)
+    local diff = self:findDiffByFile(filename)
+    if not diff then
+        print("[BeatForge] InfoDat: diff not found for file '" .. filename .. "' – skipping requirements")
+        return self
+    end
+    local cd = diffCD(diff)
+    -- Merge: avoid duplicates
+    local existing = {}
+    for _, r in ipairs(cd._requirements or {}) do existing[r] = true end
+    for _, r in ipairs(requirements) do existing[r] = true end
+    local merged = {}
+    for r in pairs(existing) do table.insert(merged, r) end
+    table.sort(merged)
+    cd._requirements = merged
+    return self
+end
+
+--- Set suggestions on a specific diff (by filename).
+--- @param filename    string
+--- @param suggestions string[]
+function InfoDat:setSuggestions(filename, suggestions)
+    local diff = self:findDiffByFile(filename)
+    if not diff then
+        print("[BeatForge] InfoDat: diff not found for file '" .. filename .. "' – skipping suggestions")
+        return self
+    end
+    local cd = diffCD(diff)
+    local existing = {}
+    for _, s in ipairs(cd._suggestions or {}) do existing[s] = true end
+    for _, s in ipairs(suggestions) do existing[s] = true end
+    local merged = {}
+    for s in pairs(existing) do table.insert(merged, s) end
+    table.sort(merged)
+    cd._suggestions = merged
+    return self
+end
+
+--- Set Heck _settings on a specific diff (by filename).
+--- @param filename string
+--- @param settings table
+function InfoDat:setDiffSettings(filename, settings)
+    local diff = self:findDiffByFile(filename)
+    if not diff then
+        print("[BeatForge] InfoDat: diff not found for file '" .. filename .. "' – skipping settings")
+        return self
+    end
+    diffCD(diff)._settings = settings
+    return self
+end
+
+--- Propagate exportSettings from a Map instance into this InfoDat.
+--- Called automatically by Pipeline.export, but can also be called manually.
+--- @param map      Map     The map object
+--- @param filename string  The diff filename (e.g. "ExpertPlus.dat")
+function InfoDat:applyMapSettings(map, filename)
+    if not map._exportSettings then return self end
+    local s = map._exportSettings
+    if s.requirements then self:setRequirements(filename, s.requirements) end
+    if s.suggestions  then self:setSuggestions(filename,  s.suggestions)  end
+    if s.settings     then self:setDiffSettings(filename, s.settings)     end
+    return self
+end
+
+-- ─── Vivify bundle CRC injection ─────────────────────────────────────────────
+-- Vivify writes CRCs into bundleinfo.json after building the bundle.
+-- The format is: { "bundleCRCs": { "_windows2019": 123, "_windows2021": 456, ... } }
+-- These need to be copied into info.dat at _customData._assetBundle.
+
+--- Read bundleinfo.json and copy all CRC values into info.dat _customData._assetBundle.
+--- Any keys already present in _assetBundle are overwritten with the fresh values.
+--- @param path string|nil  Path to bundleinfo.json, defaults to "bundleinfo.json"
+--- @return InfoDat
+function InfoDat:applyBundleInfo(path)
+    path = path or "bundleinfo.json"
+    local f = io.open(path, "r")
+    if not f then
+        error("[BeatForge] InfoDat: could not open '" .. path .. "'")
+    end
+    local raw = f:read("*a")
+    f:close()
+
+    local bi = json.decode(raw)
+    if not bi.bundleCRCs then
+        print("[BeatForge] InfoDat: bundleinfo.json has no 'bundleCRCs' key — skipping")
+        return self
+    end
+
+    self._data._customData = self._data._customData or {}
+    self._data._customData._assetBundle = self._data._customData._assetBundle or {}
+    local ab = self._data._customData._assetBundle
+
+    for key, crc in pairs(bi.bundleCRCs) do
+        ab[key] = crc
+        print(string.format("[BeatForge] Bundle CRC: %s = %d", key, crc))
+    end
+
+    return self
+end
+
+--- Remove a Vivify bundle CRC entry by key (e.g. "_windows2019").
+--- @param key string
+function InfoDat:removeVivifyBundle(key)
+    local ab = (self._data._customData or {})._assetBundle
+    if not ab then return self end
+    ab[key] = nil
+    return self
+end
+
+--- Get the stored CRC for a bundle by key (e.g. "_windows2021"). Returns nil if not found.
+--- @param key string
+--- @return integer|nil
+function InfoDat:getBundleChecksum(key)
+    return ((self._data._customData or {})._assetBundle or {})[key]
+end
+
+-- ─── Global info.dat customData ──────────────────────────────────────────────
+
+--- Set the global contributors list (Chroma/BeatSaver standard).
+--- @param contributors table[]  { { _role="Mapper", _name="...", _iconPath="..." }, ... }
+function InfoDat:setContributors(contributors)
+    self._data._customData = self._data._customData or {}
+    self._data._customData._contributors = contributors
+    return self
+end
+
+--- Set a global color scheme in info.dat customData._colorScheme.
+--- @param scheme table  From chroma.colorScheme(...)
+function InfoDat:setColorScheme(scheme)
+    self._data._customData = self._data._customData or {}
+    self._data._customData._colorScheme = scheme
+    return self
+end
+
+--- Set the environment name.
+--- @param name string  e.g. "BTSEnvironment"
+function InfoDat:setEnvironment(name)
+    self._data._environmentName = name
+    return self
+end
+
+-- ─── Raw access ──────────────────────────────────────────────────────────────
+
+--- Direct access to the raw data table (escape hatch).
+--- @return table
+function InfoDat:raw()
+    return self._data
+end
+
+-- ─── Save ────────────────────────────────────────────────────────────────────
+
+--- Write info.dat back to disk.
+--- @param path string|nil  Override output path
+function InfoDat:save(path)
+    path = path or self._path
+    local out = json.encode(self._data)
+    local f   = assert(io.open(path, "w"), "BeatForge InfoDat: could not write '" .. path .. "'")
+    f:write(out)
+    f:close()
+    print("[BeatForge] InfoDat saved → " .. path)
+    return self
+end
+
+return InfoDat
+
+end)()
+
+-- ── Module: vivify ────────────────────────────────────────────────────────
+_BF_MODULES["vivify"] = (function()
+
+--- BeatForge: modules/vivify.lua
+--- Builders for Vivify custom event types.
+---
+--- Vivify is Aeroluna's visual extension to Heck that lets mappers
+--- control GameObject prefabs, materials, renderer properties, and
+--- post-processing through custom events.
+---
+--- All events are raw tables suitable for map:addCustomEvent().
+---
+--- Reference: https://github.com/Aeroluna/Vivify
+
+local vivify = {}
+
+-- ─── Event type constants ─────────────────────────────────────────────────────
+
+vivify.type = {
+    SetMaterialProperty     = "SetMaterialProperty",
+    SetGlobalProperty       = "SetGlobalProperty",
+    AssignObjectPrefab      = "AssignObjectPrefab",
+    AssignTrackPrefab       = "AssignTrackPrefab",
+    DestroyObject           = "DestroyObject",
+    InstantiateObject       = "InstantiateObject",
+    SetAnimatorProperty     = "SetAnimatorProperty",
+    AssignFogTrack          = "AssignFogTrack",
+    SetRenderingSettings    = "SetRenderingSettings",
+    SetCameraProperty       = "SetCameraProperty",
+    CreateScreenTexture     = "CreateScreenTexture",
+    DestroyScreenTexture    = "DestroyScreenTexture",
+}
+
+-- ─── AssignObjectPrefab ───────────────────────────────────────────────────────
+-- Spawns a bundle prefab and assigns it to a track (or to note/wall objects).
+
+--- Assign a prefab from the bundle to a Heck track or to note/wall objects.
+--- @param beat      number
+--- @param loadMode  string  "Single"|"Additive"|"AdditiveAddend"|"Subtract"
+--- @param assets    table[]  Array of { bundle=str, prefab=str, track=str }
+---                           `track` here is the Vivify "object track" to use as the
+---                           attachment point; optional – omit to attach to the named
+---                           Heck track directly.
+--- @return table
+function vivify.assignObjectPrefab(beat, loadMode, assets)
+    return {
+        b = beat,
+        t = "AssignObjectPrefab",
+        d = {
+            loadMode = loadMode or "Single",
+            assets   = assets,
+        },
+    }
+end
+
+--- Shorthand: spawn one prefab on a track.
+--- @param beat    number
+--- @param bundle  string  Bundle filename (no path, e.g. "windows")
+--- @param prefab  string  Asset path inside the bundle
+--- @param track   string  Heck track name to attach to
+--- @param loadMode string|nil  Defaults to "Single"
+--- @return table
+function vivify.spawnPrefab(beat, bundle, prefab, track, loadMode)
+    return vivify.assignObjectPrefab(beat, loadMode or "Single", {
+        { bundle = bundle, prefab = prefab, track = track },
+    })
+end
+
+--- Destroy/unload all prefabs on a track (pass an empty assets list).
+--- @param beat   number
+--- @param track  string
+--- @return table
+function vivify.destroyPrefab(beat, track)
+    return {
+        b = beat,
+        t = "AssignObjectPrefab",
+        d = {
+            loadMode = "Single",
+            assets   = {},
+            track    = track,
+        },
+    }
+end
+
+-- ─── AssignTrackPrefab ────────────────────────────────────────────────────────
+-- Binds a prefab to every note/wall that spawns on a specific track.
+-- The prefab replaces or augments the default note mesh.
+
+--- @param beat   number
+--- @param track  string  Heck track
+--- @param bundle string  Bundle filename
+--- @param prefab string  Asset path inside bundle
+--- @return table
+function vivify.assignTrackPrefab(beat, track, bundle, prefab)
+    return {
+        b = beat,
+        t = "AssignTrackPrefab",
+        d = {
+            track  = track,
+            bundle = bundle,
+            prefab = prefab,
+        },
+    }
+end
+
+-- ─── SetMaterialProperty ─────────────────────────────────────────────────────
+-- Set a shader property on a material that is on a Vivify-managed renderer.
+
+--- @param beat     number
+--- @param asset    string  Material asset path or renderer track
+--- @param properties table[]  Array of { name=str, type=str, value=any }
+---                            type: "Float","Int","Color","Vector","Keyword","Texture"
+--- @param duration number|nil
+--- @param easing   string|nil
+--- @return table
+function vivify.setMaterialProperty(beat, asset, properties, duration, easing)
+    local d = {
+        asset      = asset,
+        properties = properties,
+    }
+    if duration then d.duration = duration end
+    if easing   then d.easing   = easing   end
+    return { b = beat, t = "SetMaterialProperty", d = d }
+end
+
+--- Shorthand: animate a single float property.
+--- @param beat     number
+--- @param asset    string
+--- @param name     string   Shader property name
+--- @param value    number|table  Constant or keyframe list
+--- @param duration number|nil
+--- @param easing   string|nil
+--- @return table
+function vivify.setFloat(beat, asset, name, value, duration, easing)
+    return vivify.setMaterialProperty(beat, asset,
+        { { name = name, type = "Float", value = value } },
+        duration, easing)
+end
+
+--- Shorthand: animate a color property.
+--- @param beat     number
+--- @param asset    string
+--- @param name     string
+--- @param color    number[]|table  {r,g,b,a} or keyframe list
+--- @param duration number|nil
+--- @param easing   string|nil
+--- @return table
+function vivify.setColor(beat, asset, name, color, duration, easing)
+    return vivify.setMaterialProperty(beat, asset,
+        { { name = name, type = "Color", value = color } },
+        duration, easing)
+end
+
+-- ─── SetGlobalProperty ───────────────────────────────────────────────────────
+-- Like SetMaterialProperty but targets Shader.SetGlobal* — affects all materials.
+
+--- @param beat       number
+--- @param properties table[]
+--- @param duration   number|nil
+--- @param easing     string|nil
+--- @return table
+function vivify.setGlobalProperty(beat, properties, duration, easing)
+    local d = { properties = properties }
+    if duration then d.duration = duration end
+    if easing   then d.easing   = easing   end
+    return { b = beat, t = "SetGlobalProperty", d = d }
+end
+
+-- ─── SetAnimatorProperty ─────────────────────────────────────────────────────
+
+--- Set an Animator parameter on a Vivify-managed animator.
+--- @param beat       number
+--- @param track      string  Vivify object track with an Animator component
+--- @param properties table[]  { name=str, type="Float"|"Int"|"Bool"|"Trigger", value=any }
+--- @param duration   number|nil
+--- @param easing     string|nil
+--- @return table
+function vivify.setAnimatorProperty(beat, track, properties, duration, easing)
+    local d = { track = track, properties = properties }
+    if duration then d.duration = duration end
+    if easing   then d.easing   = easing   end
+    return { b = beat, t = "SetAnimatorProperty", d = d }
+end
+
+-- ─── AssignFogTrack ───────────────────────────────────────────────────────────
+-- Assigns a Heck track to control Beat Saber's height fog parameters.
+-- Properties animatable via AnimateTrack: attenuation, offset, startY, height.
+
+--- @param beat  number
+--- @param track string  Heck track name that will drive fog
+--- @return table
+function vivify.assignFogTrack(beat, track)
+    return {
+        b = beat,
+        t = "AssignFogTrack",
+        d = { track = track },
+    }
+end
+
+--- Convenience: assign fog track and return an AnimateTrack event for it.
+--- Returns TWO events as a pair: {assignEvent, animateEvent}
+--- Insert both with map:addCustomEvent.
+--- @param map      Map     used to add the assign event immediately
+--- @param track    string
+--- @param beat     number  When to start animating fog
+--- @param duration number
+--- @param fogProps table   { attenuation=..., offset=..., startY=..., height=... }
+--- @param easing   string|nil
+--- @return table  The AnimateTrack event (assign event is already added to map)
+function vivify.animateFog(map, track, beat, duration, fogProps, easing)
+    local heck = _bf_require("heck")
+    -- Assign the fog track at beat 0 (idempotent — multiple calls are fine)
+    map:addCustomEvent(vivify.assignFogTrack(0, track))
+    -- Return the AnimateTrack event for the caller to add (or add it here)
+    local ev = heck.animateTrack(track, beat, fogProps, duration, easing)
+    map:addCustomEvent(ev)
+    return ev
+end
+
+-- ─── InstantiateObject / DestroyObject ───────────────────────────────────────
+
+--- Instantiate a prefab at a world position (not track-bound).
+--- @param beat     number
+--- @param bundle   string
+--- @param prefab   string
+--- @param id       string  Unique ID used to reference/destroy later
+--- @param position number[]|nil  {x,y,z}
+--- @param rotation number[]|nil  {x,y,z} Euler
+--- @param scale    number[]|nil  {x,y,z}
+--- @return table
+function vivify.instantiate(beat, bundle, prefab, id, position, rotation, scale)
+    local d = { bundle = bundle, prefab = prefab, id = id }
+    if position then d.position = position end
+    if rotation then d.rotation = rotation end
+    if scale    then d.scale    = scale    end
+    return { b = beat, t = "InstantiateObject", d = d }
+end
+
+--- Destroy an object previously instantiated with vivify.instantiate.
+--- @param beat number
+--- @param id   string
+--- @return table
+function vivify.destroy(beat, id)
+    return { b = beat, t = "DestroyObject", d = { id = id } }
+end
+
+-- ─── SetRenderingSettings ────────────────────────────────────────────────────
+-- Control Unity rendering/camera settings at runtime.
+
+--- @param beat     number
+--- @param settings table  Key-value pairs of rendering settings
+---   Common keys: bloomIntensity, vignetteIntensity, vignetteColor,
+---                dof_focusDistance, dof_aperture, ambientIntensity
+--- @param duration number|nil
+--- @param easing   string|nil
+--- @return table
+function vivify.setRenderingSettings(beat, settings, duration, easing)
+    local d = {}
+    for k, v in pairs(settings) do d[k] = v end
+    if duration then d.duration = duration end
+    if easing   then d.easing   = easing   end
+    return { b = beat, t = "SetRenderingSettings", d = d }
+end
+
+-- ─── Screen textures (render-to-texture) ─────────────────────────────────────
+
+--- Create a screen-space render texture and give it a name.
+--- @param beat       number
+--- @param name       string  Identifier used in shader _MainTex / global samplers
+--- @param width      integer|nil  Defaults to screen width
+--- @param height     integer|nil  Defaults to screen height
+--- @param depthBits  integer|nil  0, 16, 24 (default 0)
+--- @return table
+function vivify.createScreenTexture(beat, name, width, height, depthBits)
+    local d = { name = name }
+    if width     then d.width     = width     end
+    if height    then d.height    = height    end
+    if depthBits then d.depthBits = depthBits end
+    return { b = beat, t = "CreateScreenTexture", d = d }
+end
+
+--- Destroy a screen texture created with createScreenTexture.
+--- @param beat number
+--- @param name string
+--- @return table
+function vivify.destroyScreenTexture(beat, name)
+    return { b = beat, t = "DestroyScreenTexture", d = { name = name } }
+end
+
+-- ─── Property type helpers ───────────────────────────────────────────────────
+-- Convenience constructors for the `properties` array entries.
+
+--- Float property entry.
+function vivify.propFloat(name, value)
+    return { name = name, type = "Float", value = value }
+end
+
+--- Int property entry.
+function vivify.propInt(name, value)
+    return { name = name, type = "Int", value = value }
+end
+
+--- Color property entry.  value is {r,g,b,a} or keyframe list.
+function vivify.propColor(name, value)
+    return { name = name, type = "Color", value = value }
+end
+
+--- Vector property entry.  value is {x,y,z,w} or keyframe list.
+function vivify.propVector(name, value)
+    return { name = name, type = "Vector", value = value }
+end
+
+--- Keyword (shader keyword toggle) property entry.
+function vivify.propKeyword(name, value)
+    return { name = name, type = "Keyword", value = value }
+end
+
+--- Texture property entry.  value is a screen-texture name string.
+function vivify.propTexture(name, value)
+    return { name = name, type = "Texture", value = value }
+end
+
+-- ─── Load mode constants ─────────────────────────────────────────────────────
+
+vivify.loadMode = {
+    Single        = "Single",        -- replace any existing prefab on the track
+    Additive      = "Additive",      -- add alongside existing prefabs
+    AdditiveAddend= "AdditiveAddend",-- add but share parent transform
+    Subtract      = "Subtract",      -- remove matching prefab type
+}
+
+-- ─── Platform constants ───────────────────────────────────────────────────────
+-- Used in info.dat bundle entries (InfoDat:addVivifyBundle).
+
+vivify.platform = {
+    Windows = "windows",
+    Android = "android",
+}
+
+return vivify
+
+end)()
+
 -- ── Module: map ─────────────────────────────────────────────────────────
 _BF_MODULES["map"] = (function()
 
-    local json = _bf_require("json")
-    local Note  = _bf_require("note")
-    local Wall  = _bf_require("wall")
-    local Bomb  = _bf_require("bomb")
-    local Event = _bf_require("event")
+--- BeatForge: core/map.lua
+--- Main map object. Loads a beatmap .dat file, exposes
+--- note/wall/bomb/arc/chain/event collections, and writes
+--- the final file back to disk.
 
-    --- @class Map
-    local Map = {}
-    Map.__index = Map
+local json = _bf_require("json")
+local Note  = _bf_require("note")
+local Wall  = _bf_require("wall")
+local Bomb  = _bf_require("bomb")
+local Event = _bf_require("event")
 
-    --- Load a beatmap .dat file and return a Map object.
-    --- @param path string  Path to the difficulty .dat file (e.g. "ExpertPlus.dat")
-    --- @return Map
-    function Map.load(path)
-        local f = assert(io.open(path, "r"), "BeatForge: could not open '" .. path .. "'")
-        local raw = f:read("*a")
-        f:close()
+--- @class Map
+local Map = {}
+Map.__index = Map
 
-        local data = json.decode(raw)
+--- Load a beatmap .dat file and return a Map object.
+--- @param path string  Path to the difficulty .dat file (e.g. "ExpertPlus.dat")
+--- @return Map
+function Map.load(path)
+    local f = assert(io.open(path, "r"), "BeatForge: could not open '" .. path .. "'")
+    local raw = f:read("*a")
+    f:close()
 
-        local self = setmetatable({
-            _path    = path,
-            _data    = data,
-            _notes   = {},
-            _walls   = {},
-            _bombs   = {},
-            _arcs    = {},
-            _chains  = {},
-            _events  = {},
-        }, Map)
+    local data = json.decode(raw)
 
-        -- Wrap every raw object in its typed wrapper
-        for _, n in ipairs(data.colorNotes       or {}) do table.insert(self._notes,  Note.wrap(n))  end
-        for _, w in ipairs(data.obstacles        or {}) do table.insert(self._walls,  Wall.wrap(w))  end
-        for _, b in ipairs(data.bombNotes        or {}) do table.insert(self._bombs,  Bomb.wrap(b))  end
-        for _, e in ipairs(data.basicBeatmapEvents or {}) do table.insert(self._events, Event.wrap(e)) end
-        -- arcs / chains pass through as raw tables for now
-        for _, a in ipairs(data.sliders          or {}) do table.insert(self._arcs,   a) end
-        for _, c in ipairs(data.burstSliders     or {}) do table.insert(self._chains, c) end
+    local self = setmetatable({
+        _path           = path,
+        _data           = data,
+        _notes          = {},
+        _walls          = {},
+        _bombs          = {},
+        _arcs           = {},
+        _chains         = {},
+        _events         = {},
+        _exportSettings = nil,
+    }, Map)
 
-        return self
+    -- Wrap every raw object in its typed wrapper
+    for _, n in ipairs(data.colorNotes       or {}) do table.insert(self._notes,  Note.wrap(n))  end
+    for _, w in ipairs(data.obstacles        or {}) do table.insert(self._walls,  Wall.wrap(w))  end
+    for _, b in ipairs(data.bombNotes        or {}) do table.insert(self._bombs,  Bomb.wrap(b))  end
+    for _, e in ipairs(data.basicBeatmapEvents or {}) do table.insert(self._events, Event.wrap(e)) end
+    -- Arcs / chains pass through as raw tables for now
+    for _, a in ipairs(data.sliders          or {}) do table.insert(self._arcs,   a) end
+    for _, c in ipairs(data.burstSliders     or {}) do table.insert(self._chains, c) end
+
+    return self
+end
+
+--- Create a brand-new empty map (useful for generative scripts).
+--- @return Map
+function Map.new()
+    return setmetatable({
+        _path           = "output.dat",
+        _data           = { version = "3.3.0", colorNotes = {}, obstacles = {}, bombNotes = {},
+                             basicBeatmapEvents = {}, sliders = {}, burstSliders = {},
+                             customData = {} },
+        _notes          = {}, _walls  = {}, _bombs  = {},
+        _arcs           = {}, _chains = {}, _events = {},
+        _exportSettings = nil,
+    }, Map)
+end
+
+-- ─── Collection Iterators ─────────────────────────────────────────────────────
+
+--- Iterate all color notes, passing each to callback.
+--- The callback may modify the note in-place.
+--- @param fn fun(note: Note)
+function Map:notes(fn)
+    for _, n in ipairs(self._notes) do fn(n) end
+    return self
+end
+
+--- Iterate all obstacles (walls).
+--- @param fn fun(wall: Wall)
+function Map:walls(fn)
+    for _, w in ipairs(self._walls) do fn(w) end
+    return self
+end
+
+--- Iterate all bomb notes.
+--- @param fn fun(bomb: Bomb)
+function Map:bombs(fn)
+    for _, b in ipairs(self._bombs) do fn(b) end
+    return self
+end
+
+--- Iterate basic beat events.
+--- @param fn fun(event: Event)
+function Map:events(fn)
+    for _, e in ipairs(self._events) do fn(e) end
+    return self
+end
+
+--- Filter notes, returning a new table of matches.
+--- @param predicate fun(note: Note): boolean
+--- @return Note[]
+function Map:filterNotes(predicate)
+    local out = {}
+    for _, n in ipairs(self._notes) do
+        if predicate(n) then table.insert(out, n) end
+    end
+    return out
+end
+
+--- Add a new note to the map.
+--- @param note Note
+function Map:addNote(note)
+    table.insert(self._notes, note)
+    return self
+end
+
+--- Add a new wall to the map.
+--- @param wall Wall
+function Map:addWall(wall)
+    table.insert(self._walls, wall)
+    return self
+end
+
+--- Add a custom event (Heck AnimateTrack / AssignPathAnimation etc.)
+--- @param event table  Raw custom event table
+function Map:addCustomEvent(event)
+    self._data.customData = self._data.customData or {}
+    self._data.customData.customEvents = self._data.customData.customEvents or {}
+    table.insert(self._data.customData.customEvents, event)
+    return self
+end
+
+--- Add an environment enhancement object.
+--- @param env table  Raw environment table
+function Map:addEnvironment(env)
+    self._data.customData = self._data.customData or {}
+    self._data.customData.environment = self._data.customData.environment or {}
+    table.insert(self._data.customData.environment, env)
+    return self
+end
+
+--- Set the _settings block (Heck modifiers / recommended settings).
+--- @param settings table
+function Map:setSettings(settings)
+    self._data.customData = self._data.customData or {}
+    self._data.customData._settings = settings
+    
+    -- Cache settings so pipeline.lua can copy mod requirements to info.dat
+    self._exportSettings = settings
+    return self
+end
+
+-- ─── Save ────────────────────────────────────────────────────────────────────
+
+--- Serialise back to JSON and write to disk.
+--- @param path string|nil  Override output path (defaults to loaded path)
+function Map:save(path)
+    path = path or self._path
+
+    -- Flush wrappers back into the raw data arrays
+    self._data.colorNotes         = {}
+    self._data.obstacles          = {}
+    self._data.bombNotes          = {}
+    self._data.basicBeatmapEvents = {}
+    self._data.sliders            = self._arcs
+    self._data.burstSliders       = self._chains
+
+    for _, n in ipairs(self._notes)  do table.insert(self._data.colorNotes,  n._raw) end
+    for _, w in ipairs(self._walls)  do table.insert(self._data.obstacles,   w._raw) end
+    for _, b in ipairs(self._bombs)  do table.insert(self._data.bombNotes,   b._raw) end
+    for _, e in ipairs(self._events) do table.insert(self._data.basicBeatmapEvents, e._raw) end
+
+    local out = json.encode(self._data)
+    local f   = assert(io.open(path, "w"), "BeatForge: could not write '" .. path .. "'")
+    f:write(out)
+    f:close()
+
+    print(string.format("[BeatForge] Saved → %s  (%d notes, %d walls, %d bombs)",
+        path, #self._notes, #self._walls, #self._bombs))
+    return self
+end
+
+return Map
+end)()
+
+-- ── Module: pipeline ──────────────────────────────────────────────────────
+_BF_MODULES["pipeline"] = (function()
+
+--- BeatForge: core/pipeline.lua
+--- Orchestrates the final map deployment pipeline:
+---   • Propagates per-diff requirements/suggestions/settings into info.dat
+---   • Injects Vivify bundle CRC-32 checksums automatically
+---   • Copies media and untouched diffs to the output directory
+---   • Optionally creates a .zip archive
+
+local json    = require("beatforge.utils.json")
+local InfoDat = _bf_require("info")
+
+--- @class Pipeline
+local Pipeline = {}
+
+-- ─── Internal OS Helpers ─────────────────────────────────────────────────────
+
+local function readFile(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local content = f:read("*a")
+    f:close()
+    return content
+end
+
+local function writeFile(path, content)
+    local f = io.open(path, "wb")
+    if not f then return false end
+    f:write(content)
+    f:close()
+    return true
+end
+
+local function copyFile(src, dest)
+    local infile = io.open(src, "rb")
+    if not infile then return false end
+    local outfile = io.open(dest, "wb")
+    if not outfile then infile:close(); return false end
+    local chunk_size = 2 ^ 13  -- 8 KB
+    while true do
+        local block = infile:read(chunk_size)
+        if not block then break end
+        outfile:write(block)
+    end
+    infile:close()
+    outfile:close()
+    return true
+end
+
+-- Normalizes paths: "./" prefix steps out of the local song folder.
+local function normalizePath(path)
+    if path:sub(1, 2) == "./" then
+        return "../" .. path:sub(3)
+    end
+    return path
+end
+
+local function isWindows()
+    return package.config:sub(1, 1) == "\\"
+end
+
+local function mkdir(dir)
+    if isWindows() then
+        os.execute('mkdir "' .. dir:gsub("/", "\\") .. '" 2>nul')
+    else
+        os.execute('mkdir -p "' .. dir .. '" 2>/dev/null')
+    end
+end
+
+-- ─── Pipeline API ─────────────────────────────────────────────────────────────
+
+--- Export the map to an output directory.
+---
+--- config fields:
+---   outputDirectory  string    (required) Target folder
+---   infoPath         string    (optional) Path to info.dat, default "info.dat"
+---   vivifyBundles    table[]   (optional) { { path="windows.vivify", platform="windows" }, ... }
+---                              Each bundle's CRC-32 is computed and written into info.dat.
+---   zip              table     (optional) { name = "MyMapArchive" }
+---
+--- @param config table
+function Pipeline.export(config)
+    assert(config.outputDirectory, "BeatForge Pipeline: 'outputDirectory' must be specified.")
+
+    local targetDir = normalizePath(config.outputDirectory):gsub("[/\\]+$", "")
+    local infoPath  = config.infoPath or "info.dat"
+
+    -- 1. Load info.dat via InfoDat class
+    local info = InfoDat.load(infoPath)
+
+    -- 2. Ensure output directory exists
+    mkdir(targetDir)
+
+    -- 3. Propagate per-diff settings from any loaded Map instances
+    if _BF_ACTIVE_MAPS then
+        info:eachDiff(function(diff)
+            local filename = diff._beatmapFilename
+            local boundMap = _BF_ACTIVE_MAPS[filename]
+            if boundMap then
+                -- Applies requirements, suggestions, settings from map._exportSettings
+                info:applyMapSettings(boundMap, filename)
+                -- Save the transformed diff
+                boundMap:save(targetDir .. "/" .. filename)
+            else
+                -- Copy the untouched original diff file if it exists
+                if io.open(filename, "r") then
+                    copyFile(filename, targetDir .. "/" .. filename)
+                end
+            end
+        end)
     end
 
-    --- Create a brand-new empty map (useful for generative scripts).
-    --- @return Map
-    function Map.new()
-        return setmetatable({
-            _path    = "output.dat",
-            _data    = { version = "3.3.0", colorNotes = {}, obstacles = {}, bombNotes = {},
-                         basicBeatmapEvents = {}, sliders = {}, burstSliders = {},
-                         customData = {} },
-            _notes   = {}, _walls  = {}, _bombs  = {},
-            _arcs    = {}, _chains = {}, _events = {},
-        }, Map)
+    -- 4. Vivify bundle CRC injection
+    --    Reads bundleinfo.json (written by the Vivify build step) and copies
+    --    bundleCRCs into info.dat _customData._assetBundle.
+    local bundleInfoPath = config.bundleInfoPath or "bundleinfo.json"
+    if io.open(bundleInfoPath, "r") then
+        info:applyBundleInfo(bundleInfoPath)
+    else
+        print("[BeatForge] Pipeline: no bundleinfo.json found at '" .. bundleInfoPath .. "' — skipping CRC injection")
     end
 
-    -- ─── Collection iterators ─────────────────────────────────────────────────────
+    -- 5. Sync media
+    local songFile  = info:getSongFilename()
+    local coverFile = info:getCoverFilename()
+    if songFile  and io.open(songFile,  "rb") then copyFile(songFile,  targetDir .. "/" .. songFile)  end
+    if coverFile and io.open(coverFile, "rb") then copyFile(coverFile, targetDir .. "/" .. coverFile) end
 
-    --- Iterate all color notes, passing each to callback.
-    --- The callback may modify the note in-place.
-    --- @param fn fun(note: Note)
-    function Map:notes(fn)
-        for _, n in ipairs(self._notes) do fn(n) end
-        return self
-    end
+    -- 6. Save updated info.dat to output directory
+    info:save(targetDir .. "/info.dat")
 
-    --- Iterate all obstacles (walls).
-    --- @param fn fun(wall: Wall)
-    function Map:walls(fn)
-        for _, w in ipairs(self._walls) do fn(w) end
-        return self
-    end
+    print("[BeatForge] Pipeline export complete → " .. targetDir)
 
-    --- Iterate all bomb notes.
-    --- @param fn fun(bomb: Bomb)
-    function Map:bombs(fn)
-        for _, b in ipairs(self._bombs) do fn(b) end
-        return self
-    end
+    -- 7. Optional zip archive
+    if config.zip then
+        local zipName   = config.zip.name or "MapArchive"
+        local archiveDest = targetDir .. "/../" .. zipName .. ".zip"
+        local cmd
 
-    --- Iterate basic beat events.
-    --- @param fn fun(event: Event)
-    function Map:events(fn)
-        for _, e in ipairs(self._events) do fn(e) end
-        return self
-    end
-
-    --- Filter notes, returning a new table of matches.
-    --- @param predicate fun(note: Note): boolean
-    --- @return Note[]
-    function Map:filterNotes(predicate)
-        local out = {}
-        for _, n in ipairs(self._notes) do
-            if predicate(n) then table.insert(out, n) end
+        if isWindows() then
+            local winTarget = targetDir:gsub("/", "\\")
+            local winDest   = archiveDest:gsub("/", "\\")
+            cmd = string.format(
+                'powershell -Command "Compress-Archive -Path \'%s\\*\' -DestinationPath \'%s\' -Force"',
+                winTarget, winDest)
+        else
+            cmd = string.format('cd "%s" && zip -q -r "../%s.zip" ./*', targetDir, zipName)
         end
-        return out
+
+        local success = os.execute(cmd)
+        if success then
+            print("[BeatForge] Archive created: " .. archiveDest)
+        else
+            print("[BeatForge] Warning: compression exited with unexpected code.")
+        end
     end
+end
 
-    --- Add a new note to the map.
-    --- @param note Note
-    function Map:addNote(note)
-        table.insert(self._notes, note)
-        return self
-    end
+--- Convenience: read bundleinfo.json and patch info.dat CRCs in-place.
+--- Useful when you just want to refresh CRCs after a bundle rebuild.
+--- @param bundleInfoPath string|nil  Defaults to "bundleinfo.json"
+--- @param infoPath       string|nil  Defaults to "info.dat"
+function Pipeline.refreshBundleCRCs(bundleInfoPath, infoPath)
+    local info = InfoDat.load(infoPath or "info.dat")
+    info:applyBundleInfo(bundleInfoPath or "bundleinfo.json")
+    info:save()
+    print("[BeatForge] CRCs refreshed in " .. (infoPath or "info.dat"))
+end
 
-    --- Add a new wall to the map.
-    --- @param wall Wall
-    function Map:addWall(wall)
-        table.insert(self._walls, wall)
-        return self
-    end
+return Pipeline
 
-    --- Add a custom event (Heck AnimateTrack / AssignPathAnimation etc.)
-    --- @param event table  Raw custom event table
-    function Map:addCustomEvent(event)
-        self._data.customData = self._data.customData or {}
-        self._data.customData.customEvents = self._data.customData.customEvents or {}
-        table.insert(self._data.customData.customEvents, event)
-        return self
-    end
-
-    --- Add an environment enhancement object.
-    --- @param env table  Raw environment table
-    function Map:addEnvironment(env)
-        self._data.customData = self._data.customData or {}
-        self._data.customData.environment = self._data.customData.environment or {}
-        table.insert(self._data.customData.environment, env)
-        return self
-    end
-
-    --- Set the _settings block (Heck modifiers / recommended settings).
-    --- @param settings table
-    function Map:setSettings(settings)
-        self._data.customData = self._data.customData or {}
-        self._data.customData._settings = settings
-        return self
-    end
-
-    -- ─── Save ────────────────────────────────────────────────────────────────────
-
-    --- Serialise back to JSON and write to disk.
-    --- @param path string|nil  Override output path (defaults to loaded path)
-    function Map:save(path)
-        path = path or self._path
-
-        -- Flush wrappers back into the raw data arrays
-        self._data.colorNotes         = {}
-        self._data.obstacles          = {}
-        self._data.bombNotes          = {}
-        self._data.basicBeatmapEvents = {}
-        self._data.sliders            = self._arcs
-        self._data.burstSliders       = self._chains
-
-        for _, n in ipairs(self._notes)  do table.insert(self._data.colorNotes,  n._raw) end
-        for _, w in ipairs(self._walls)  do table.insert(self._data.obstacles,   w._raw) end
-        for _, b in ipairs(self._bombs)  do table.insert(self._data.bombNotes,   b._raw) end
-        for _, e in ipairs(self._events) do table.insert(self._data.basicBeatmapEvents, e._raw) end
-
-        local out = json.encode(self._data)
-        local f   = assert(io.open(path, "w"), "BeatForge: could not write '" .. path .. "'")
-        f:write(out)
-        f:close()
-
-        print(string.format("[BeatForge] Saved → %s  (%d notes, %d walls, %d bombs)",
-            path, #self._notes, #self._walls, #self._bombs))
-        return self
-    end
-
-    return Map
 end)()
 
 -- ── Long-name aliases ────────────────────────────────────────────────────────
-_BF_MODULES["beatforge.utils.json"] = _BF_MODULES["json"]
-_BF_MODULES["beatforge.utils.bfmath"] = _BF_MODULES["bfmath"]
-_BF_MODULES["beatforge.core.note"] = _BF_MODULES["note"]
-_BF_MODULES["beatforge.core.wall"] = _BF_MODULES["wall"]
-_BF_MODULES["beatforge.core.bomb"] = _BF_MODULES["bomb"]
-_BF_MODULES["beatforge.core.event"] = _BF_MODULES["event"]
-_BF_MODULES["beatforge.core.map"] = _BF_MODULES["map"]
-_BF_MODULES["beatforge.modules.heck"] = _BF_MODULES["heck"]
-_BF_MODULES["beatforge.modules.chroma"] = _BF_MODULES["chroma"]
-_BF_MODULES["beatforge.modules.noodle"] = _BF_MODULES["noodle"]
+_BF_MODULES["beatforge.utils.json"]      = _BF_MODULES["json"]
+_BF_MODULES["beatforge.utils.bfmath"]    = _BF_MODULES["bfmath"]
+_BF_MODULES["beatforge.core.note"]       = _BF_MODULES["note"]
+_BF_MODULES["beatforge.core.wall"]       = _BF_MODULES["wall"]
+_BF_MODULES["beatforge.core.bomb"]       = _BF_MODULES["bomb"]
+_BF_MODULES["beatforge.core.event"]      = _BF_MODULES["event"]
+_BF_MODULES["beatforge.core.map"]        = _BF_MODULES["map"]
+_BF_MODULES["beatforge.core.info"]       = _BF_MODULES["info"]
+_BF_MODULES["beatforge.core.pipeline"]   = _BF_MODULES["pipeline"]
+_BF_MODULES["beatforge.modules.heck"]    = _BF_MODULES["heck"]
+_BF_MODULES["beatforge.modules.chroma"]  = _BF_MODULES["chroma"]
+_BF_MODULES["beatforge.modules.noodle"]  = _BF_MODULES["noodle"]
+_BF_MODULES["beatforge.modules.vivify"]  = _BF_MODULES["vivify"]
 
 -- ── Public API ───────────────────────────────────────────────────────────────
+_BF_ACTIVE_MAPS = {}
+
 local BeatForge = {}
-BeatForge.Map    = _BF_MODULES["map"]
-BeatForge.Note   = _BF_MODULES["note"]
-BeatForge.Wall   = _BF_MODULES["wall"]
-BeatForge.Bomb   = _BF_MODULES["bomb"]
-BeatForge.Event  = _BF_MODULES["event"]
-BeatForge.heck   = _BF_MODULES["heck"]
-BeatForge.chroma = _BF_MODULES["chroma"]
-BeatForge.noodle = _BF_MODULES["noodle"]
-BeatForge.math   = _BF_MODULES["bfmath"]
+BeatForge.Map      = _BF_MODULES["map"]
+BeatForge.Note     = _BF_MODULES["note"]
+BeatForge.Wall     = _BF_MODULES["wall"]
+BeatForge.Bomb     = _BF_MODULES["bomb"]
+BeatForge.Event    = _BF_MODULES["event"]
+BeatForge.InfoDat  = _BF_MODULES["info"]
+BeatForge.pipeline = _BF_MODULES["pipeline"]
+BeatForge.heck     = _BF_MODULES["heck"]
+BeatForge.chroma   = _BF_MODULES["chroma"]
+BeatForge.noodle   = _BF_MODULES["noodle"]
+BeatForge.vivify   = _BF_MODULES["vivify"]
+BeatForge.math     = _BF_MODULES["bfmath"]
 
-function BeatForge.load(path)  return BeatForge.Map.load(path) end
-function BeatForge.new()       return BeatForge.Map.new()      end
+function BeatForge.load(path)
+    local instance = BeatForge.Map.load(path)
+    local key = path:match("([^/\\]+)$") or path
+    _BF_ACTIVE_MAPS[key] = instance
+    return instance
+end
 
-BeatForge.VERSION = "1.0.0"
+function BeatForge.new(filename)
+    local instance = BeatForge.Map.new()
+    if filename then instance._path = filename end
+    local key = instance._path:match("([^/\\]+)$") or instance._path
+    _BF_ACTIVE_MAPS[key] = instance
+    return instance
+end
+
+function BeatForge.loadInfo(path)
+    return BeatForge.InfoDat.load(path or "info.dat")
+end
+
+BeatForge.VERSION = "1.1.0"
 return BeatForge

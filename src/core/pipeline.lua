@@ -1,8 +1,12 @@
 --- BeatForge: core/pipeline.lua
---- Orchestrates the final map deployment pipeline, metadata updates,
---- folder structure cloning, and artifact distribution compression (.zip).
+--- Orchestrates the final map deployment pipeline:
+---   • Propagates per-diff requirements/suggestions/settings into info.dat
+---   • Injects Vivify bundle CRC-32 checksums automatically
+---   • Copies media and untouched diffs to the output directory
+---   • Optionally creates a .zip archive
 
-local json = require("beatforge.utils.json")
+local json    = require("beatforge.utils.json")
+local InfoDat = require("beatforge.core.info")
 
 --- @class Pipeline
 local Pipeline = {}
@@ -29,9 +33,8 @@ local function copyFile(src, dest)
     local infile = io.open(src, "rb")
     if not infile then return false end
     local outfile = io.open(dest, "wb")
-    if not outfile then infile:close() return false end
-    
-    local chunk_size = 2^13 -- 8KB
+    if not outfile then infile:close(); return false end
+    local chunk_size = 2 ^ 13  -- 8 KB
     while true do
         local block = infile:read(chunk_size)
         if not block then break end
@@ -42,8 +45,7 @@ local function copyFile(src, dest)
     return true
 end
 
--- Normalizes paths relative to parent spaces. If the string begins with './',
--- it steps out of the local song folder into CustomWIPLevels.
+-- Normalizes paths: "./" prefix steps out of the local song folder.
 local function normalizePath(path)
     if path:sub(1, 2) == "./" then
         return "../" .. path:sub(3)
@@ -51,100 +53,116 @@ local function normalizePath(path)
     return path
 end
 
--- ─── Pipeline API ────────────────────────────────────────────────────────────
+local function isWindows()
+    return package.config:sub(1, 1) == "\\"
+end
 
---- Run deployment sequences across active map instances.
---- @param config table Interface configuration object
+local function mkdir(dir)
+    if isWindows() then
+        os.execute('mkdir "' .. dir:gsub("/", "\\") .. '" 2>nul')
+    else
+        os.execute('mkdir -p "' .. dir .. '" 2>/dev/null')
+    end
+end
+
+-- ─── Pipeline API ─────────────────────────────────────────────────────────────
+
+--- Export the map to an output directory.
+---
+--- config fields:
+---   outputDirectory  string    (required) Target folder
+---   infoPath         string    (optional) Path to info.dat, default "info.dat"
+---   vivifyBundles    table[]   (optional) { { path="windows.vivify", platform="windows" }, ... }
+---                              Each bundle's CRC-32 is computed and written into info.dat.
+---   zip              table     (optional) { name = "MyMapArchive" }
+---
+--- @param config table
 function Pipeline.export(config)
     assert(config.outputDirectory, "BeatForge Pipeline: 'outputDirectory' must be specified.")
-    
+
     local targetDir = normalizePath(config.outputDirectory):gsub("[/\\]+$", "")
-    local sourceInfoPath = "info.dat"
-    
-    -- 1. Read local base layout configuration
-    local infoRaw = readFile(sourceInfoPath)
-    if not infoRaw then
-        error("BeatForge Pipeline: Could not find baseline map configuration metadata layout 'info.dat'.")
-    end
-    local infoData = json.decode(infoRaw)
+    local infoPath  = config.infoPath or "info.dat"
 
-    -- Ensure target directory structural workspace exists safely
-    local isWindows = package.config:sub(1,1) == "\\"
-    if isWindows then
-        os.execute('mkdir "' .. targetDir:gsub("/", "\\") .. '" 2>nul')
-    else
-        os.execute('mkdir -p "' .. targetDir .. '" 2>/dev/null')
-    end
+    -- 1. Load info.dat via InfoDat class
+    local info = InfoDat.load(infoPath)
 
-    -- 2. Process requirement configurations across loaded active difficulty maps
-    if _BF_ACTIVE_MAPS and infoData._difficultyBeatmapSets then
-        for _, set in ipairs(infoData._difficultyBeatmapSets) do
-            for _, diff in ipairs(set._difficultyBeatmaps) do
-                local filename = diff._beatmapFilename
-                local boundMap = _BF_ACTIVE_MAPS[filename]
+    -- 2. Ensure output directory exists
+    mkdir(targetDir)
 
-                if boundMap then
-                    diff._customData = diff._customData or {}
-                    
-                    -- Extract configuration rules handled during script execution
-                    if boundMap._exportSettings then
-                        if boundMap._exportSettings.requirements then
-                            diff._customData._requirements = boundMap._exportSettings.requirements
-                        end
-                        if boundMap._exportSettings.suggestions then
-                            diff._customData._suggestions = boundMap._exportSettings.suggestions
-                        end
-                        if boundMap._exportSettings.settings then
-                            diff._customData._settings = boundMap._exportSettings.settings
-                        end
-                    end
-
-                    -- Save the transformed difficulty payload into target location
-                    boundMap:save(targetDir .. "/" .. filename)
-                else
-                    -- Copy untouched original map file if not targeted by current lua script execution pass
-                    if io.open(filename, "r") then
-                        copyFile(filename, targetDir .. "/" .. filename)
-                    end
+    -- 3. Propagate per-diff settings from any loaded Map instances
+    if _BF_ACTIVE_MAPS then
+        info:eachDiff(function(diff)
+            local filename = diff._beatmapFilename
+            local boundMap = _BF_ACTIVE_MAPS[filename]
+            if boundMap then
+                -- Applies requirements, suggestions, settings from map._exportSettings
+                info:applyMapSettings(boundMap, filename)
+                -- Save the transformed diff
+                boundMap:save(targetDir .. "/" .. filename)
+            else
+                -- Copy the untouched original diff file if it exists
+                if io.open(filename, "r") then
+                    copyFile(filename, targetDir .. "/" .. filename)
                 end
             end
-        end
+        end)
     end
 
-    -- 3. Sync media resource targets
-    local songFilename  = infoData._songFilename
-    local coverFilename = infoData._coverImageFilename
+    -- 4. Vivify bundle CRC injection
+    --    Reads bundleinfo.json (written by the Vivify build step) and copies
+    --    bundleCRCs into info.dat _customData._assetBundle.
+    local bundleInfoPath = config.bundleInfoPath or "bundleinfo.json"
+    if io.open(bundleInfoPath, "r") then
+        info:applyBundleInfo(bundleInfoPath)
+    else
+        print("[BeatForge] Pipeline: no bundleinfo.json found at '" .. bundleInfoPath .. "' — skipping CRC injection")
+    end
 
-    if songFilename  then copyFile(songFilename,  targetDir .. "/" .. songFilename)  end
-    if coverFilename then copyFile(coverFilename, targetDir .. "/" .. coverFilename) end
+    -- 5. Sync media
+    local songFile  = info:getSongFilename()
+    local coverFile = info:getCoverFilename()
+    if songFile  and io.open(songFile,  "rb") then copyFile(songFile,  targetDir .. "/" .. songFile)  end
+    if coverFile and io.open(coverFile, "rb") then copyFile(coverFile, targetDir .. "/" .. coverFile) end
 
-    -- 4. Dump updated manifest mapping configuration properties
-    writeFile(targetDir .. "/info.dat", json.encode(infoData))
-    print("[BeatForge] Map workspace deployment generated at target directory location: " .. targetDir)
+    -- 6. Save updated info.dat to output directory
+    info:save(targetDir .. "/info.dat")
 
-    -- 5. Optional compression archive configuration
+    print("[BeatForge] Pipeline export complete → " .. targetDir)
+
+    -- 7. Optional zip archive
     if config.zip then
-        local zipName = config.zip.name or "MapArchive"
+        local zipName   = config.zip.name or "MapArchive"
         local archiveDest = targetDir .. "/../" .. zipName .. ".zip"
         local cmd
-        
-        if isWindows then
-            -- Use PowerShell to create zip on Windows platforms natively
+
+        if isWindows() then
             local winTarget = targetDir:gsub("/", "\\")
             local winDest   = archiveDest:gsub("/", "\\")
-            cmd = string.format('powershell -Command "Compress-Archive -Path \'%s\\*\' -DestinationPath \'%s\' -Force"', winTarget, winDest)
+            cmd = string.format(
+                'powershell -Command "Compress-Archive -Path \'%s\\*\' -DestinationPath \'%s\' -Force"',
+                winTarget, winDest)
         else
-            -- Standard Posix compression sequence
             cmd = string.format('cd "%s" && zip -q -r "../%s.zip" ./*', targetDir, zipName)
         end
-        
+
         local success = os.execute(cmd)
         if success then
-            print("[BeatForge] Successfully created map zip file package at: " .. archiveDest)
+            print("[BeatForge] Archive created: " .. archiveDest)
         else
-            print("[BeatForge] Warning: Native workspace compression tasks exited with unexpected codes.")
+            print("[BeatForge] Warning: compression exited with unexpected code.")
         end
     end
+end
+
+--- Convenience: read bundleinfo.json and patch info.dat CRCs in-place.
+--- Useful when you just want to refresh CRCs after a bundle rebuild.
+--- @param bundleInfoPath string|nil  Defaults to "bundleinfo.json"
+--- @param infoPath       string|nil  Defaults to "info.dat"
+function Pipeline.refreshBundleCRCs(bundleInfoPath, infoPath)
+    local info = InfoDat.load(infoPath or "info.dat")
+    info:applyBundleInfo(bundleInfoPath or "bundleinfo.json")
+    info:save()
+    print("[BeatForge] CRCs refreshed in " .. (infoPath or "info.dat"))
 end
 
 return Pipeline

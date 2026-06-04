@@ -6,7 +6,7 @@
 
 local CACHE  = ".beatforge_cache.lua"
 local URL    = "https://raw.githubusercontent.com/ThijsvZwam/BeatForge/main/bundle.lua"
-local NEEDED = "1.0.0"  -- bump this to force a re-download on next run
+local NEEDED = "1.1.0"  -- bump this to force a re-download on next run
 
 -- ── Try to load from cache ────────────────────────────────────────────────────
 
